@@ -1,11 +1,12 @@
-process.env.DB_PATH = ':memory:';
-process.env.JWT_SECRET = 'test_secret';
-
+const { setupDatabase, closeDb, cleanDatabase } = require('./setup');
 const request = require('supertest');
 const app = require('../src/index');
-const { setupDatabase, closeDb } = require('../src/db/setup');
 
-beforeAll(() => setupDatabase());
+beforeAll(async () => {
+  await setupDatabase();
+  await cleanDatabase();
+  await setupDatabase(); // re-seed
+});
 afterAll(() => closeDb());
 
 describe('POST /api/auth/register', () => {

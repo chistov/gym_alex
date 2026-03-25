@@ -14,15 +14,27 @@ const userTrainingsRoutes = require('./routes/userTrainings');
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-setupDatabase();
+// DB initialization (lazy, once per cold start)
+let dbReady = false;
+app.use(async (req, res, next) => {
+  if (!dbReady) {
+    try {
+      await setupDatabase();
+      dbReady = true;
+    } catch (err) {
+      console.error('DB setup error:', err);
+      return res.status(500).json({ message: 'Database initialization failed' });
+    }
+  }
+  next();
+});
 
 const allowedOrigins = process.env.ALLOWED_ORIGINS
-  ? process.env.ALLOWED_ORIGINS.split(',')
+  ? process.env.ALLOWED_ORIGINS.split(',').map(s => s.trim())
   : ['http://localhost:3000'];
 
 app.use(cors({
   origin: (origin, callback) => {
-    // Allow requests with no origin (mobile apps, curl, etc.)
     if (!origin) return callback(null, true);
     if (allowedOrigins.includes(origin)) return callback(null, true);
     callback(new Error(`CORS: origin ${origin} not allowed`));

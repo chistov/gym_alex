@@ -1,11 +1,10 @@
-process.env.DB_PATH = ':memory:';
-process.env.JWT_SECRET = 'test_secret';
-
+const { setupDatabase, closeDb } = require('./setup');
 const request = require('supertest');
 const app = require('../src/index');
-const { setupDatabase, closeDb } = require('../src/db/setup');
 
-beforeAll(() => setupDatabase());
+beforeAll(async () => {
+  await setupDatabase();
+});
 afterAll(() => closeDb());
 
 let adminToken;
@@ -14,11 +13,11 @@ let userToken;
 beforeAll(async () => {
   await request(app).post('/api/auth/register').send({
     name: 'Пользователь',
-    email: 'user@example.com',
+    email: 'newsuser@example.com',
     password: 'password123',
   });
   const userRes = await request(app).post('/api/auth/login').send({
-    email: 'user@example.com',
+    email: 'newsuser@example.com',
     password: 'password123',
   });
   userToken = userRes.body.token;

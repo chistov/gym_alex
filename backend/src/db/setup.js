@@ -1,29 +1,27 @@
-const Database = require('better-sqlite3');
+const { Pool } = require('pg');
 const bcrypt = require('bcryptjs');
-const path = require('path');
-const fs = require('fs');
 
-const DB_PATH = process.env.DB_PATH || path.join(__dirname, '../../data/gym_alex.db');
+let pool;
 
-let db;
-
-function getDb() {
-  if (!db) {
-    const dir = path.dirname(DB_PATH);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    db = new Database(DB_PATH);
-    db.pragma('journal_mode = WAL');
-    db.pragma('foreign_keys = ON');
+function getPool() {
+  if (!pool) {
+    pool = new Pool({
+      connectionString: process.env.DATABASE_URL,
+      ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+    });
   }
-  return db;
+  return pool;
 }
 
-function setupDatabase() {
-  const database = getDb();
+async function query(text, params) {
+  const result = await getPool().query(text, params);
+  return result;
+}
 
-  database.exec(`
+async function setupDatabase() {
+  await query(`
     CREATE TABLE IF NOT EXISTS users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id SERIAL PRIMARY KEY,
       name TEXT NOT NULL,
       email TEXT UNIQUE NOT NULL,
       password_hash TEXT NOT NULL,
@@ -37,21 +35,25 @@ function setupDatabase() {
       experience TEXT,
       health_notes TEXT,
       avatar_url TEXT,
-      created_at TEXT DEFAULT (datetime('now'))
-    );
+      created_at TIMESTAMP DEFAULT NOW()
+    )
+  `);
 
+  await query(`
     CREATE TABLE IF NOT EXISTS news (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id SERIAL PRIMARY KEY,
       title TEXT NOT NULL,
       content TEXT NOT NULL,
       image_url TEXT,
       published INTEGER DEFAULT 1,
-      created_at TEXT DEFAULT (datetime('now')),
-      updated_at TEXT DEFAULT (datetime('now'))
-    );
+      created_at TIMESTAMP DEFAULT NOW(),
+      updated_at TIMESTAMP DEFAULT NOW()
+    )
+  `);
 
+  await query(`
     CREATE TABLE IF NOT EXISTS products (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id SERIAL PRIMARY KEY,
       name TEXT NOT NULL,
       description TEXT,
       price REAL NOT NULL,
@@ -59,90 +61,78 @@ function setupDatabase() {
       category TEXT DEFAULT 'general',
       stock INTEGER DEFAULT 0,
       published INTEGER DEFAULT 1,
-      created_at TEXT DEFAULT (datetime('now'))
-    );
+      created_at TIMESTAMP DEFAULT NOW()
+    )
+  `);
 
+  await query(`
     CREATE TABLE IF NOT EXISTS trainings (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id SERIAL PRIMARY KEY,
       title TEXT NOT NULL,
       description TEXT,
       difficulty TEXT DEFAULT 'beginner',
       duration_weeks INTEGER DEFAULT 4,
       image_url TEXT,
       published INTEGER DEFAULT 1,
-      created_at TEXT DEFAULT (datetime('now'))
-    );
+      created_at TIMESTAMP DEFAULT NOW()
+    )
+  `);
 
+  await query(`
     CREATE TABLE IF NOT EXISTS exercises (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      training_id INTEGER NOT NULL,
+      id SERIAL PRIMARY KEY,
+      training_id INTEGER NOT NULL REFERENCES trainings(id) ON DELETE CASCADE,
       name TEXT NOT NULL,
       sets INTEGER DEFAULT 3,
       reps TEXT DEFAULT '10',
       rest_seconds INTEGER DEFAULT 60,
       description TEXT,
-      order_index INTEGER DEFAULT 0,
-      FOREIGN KEY (training_id) REFERENCES trainings(id) ON DELETE CASCADE
-    );
-
-    CREATE TABLE IF NOT EXISTS user_trainings (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_id INTEGER NOT NULL,
-      training_id INTEGER NOT NULL,
-      assigned_at TEXT DEFAULT (datetime('now')),
-      status TEXT DEFAULT 'active',
-      notes TEXT,
-      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
-      FOREIGN KEY (training_id) REFERENCES trainings(id) ON DELETE CASCADE
-    );
+      order_index INTEGER DEFAULT 0
+    )
   `);
 
-  seedAdminUser(database);
-  seedDemoData(database);
+  await query(`
+    CREATE TABLE IF NOT EXISTS user_trainings (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      training_id INTEGER NOT NULL REFERENCES trainings(id) ON DELETE CASCADE,
+      assigned_at TIMESTAMP DEFAULT NOW(),
+      status TEXT DEFAULT 'active',
+      notes TEXT
+    )
+  `);
+
+  await seedAdminUser();
+  await seedDemoData();
 }
 
-function seedAdminUser(database) {
-  const existing = database.prepare('SELECT id FROM users WHERE email = ?').get('admin@gym-alex.ru');
-  if (!existing) {
+async function seedAdminUser() {
+  const { rows } = await query('SELECT id FROM users WHERE email = $1', ['admin@gym-alex.ru']);
+  if (rows.length === 0) {
     const hash = bcrypt.hashSync('admin123', 10);
-    database.prepare(`
-      INSERT INTO users (name, email, password_hash, role)
-      VALUES (?, ?, ?, ?)
-    `).run('Алексей Голубев', 'admin@gym-alex.ru', hash, 'admin');
+    await query(
+      'INSERT INTO users (name, email, password_hash, role) VALUES ($1, $2, $3, $4)',
+      ['Алексей Голубев', 'admin@gym-alex.ru', hash, 'admin']
+    );
   }
 }
 
-function seedDemoData(database) {
-  const newsCount = database.prepare('SELECT COUNT(*) as cnt FROM news').get().cnt;
-  if (newsCount === 0) {
+async function seedDemoData() {
+  const { rows: newsRows } = await query('SELECT COUNT(*) as cnt FROM news');
+  if (parseInt(newsRows[0].cnt) === 0) {
     const newsItems = [
-      {
-        title: 'Добро пожаловать! Я — Алексей Голубев, МС по русскому жиму',
-        content: 'Привет! Я Алексей Голубев — Мастер спорта по русскому жиму. Тренирую спортсменов от новичков до соревновательного уровня. На этом сайте вы найдёте тренировочные программы по жиму лёжа, полезные материалы по технике и силовой подготовке. Поехали!',
-        image_url: null
-      },
-      {
-        title: 'Что такое русский жим и почему это круто',
-        content: 'Русский жим — это жим штанги лёжа на максимальное количество повторений с фиксированным весом (как правило, 80% от веса спортсмена). Дисциплина требует сочетания взрывной силы и выносливости. Именно это делает её такой зрелищной и сложной. Спортсмен должен не просто поднять вес — он должен делать это снова и снова, сохраняя технику. Я сам прошёл путь от первого робкого жима до звания Мастера спорта и знаю, что реально работает.',
-        image_url: null
-      },
-      {
-        title: 'Постановка техники жима лёжа: 5 ключевых точек',
-        content: '1. Хват — чуть шире плеч, большой палец обхватывает гриф. 2. Сведение лопаток — грудь вперёд, плечи назад и вниз. 3. Прогиб в пояснице — естественный, не экстремальный. 4. Ноги на полу — создают жёсткую платформу, помогают стабилизировать тело. 5. Траектория грифа — лёгкая дуга от нижней части груди к точке над плечами. Первые три месяца работаем только над техникой — это фундамент всего дальнейшего прогресса.',
-        image_url: null
-      },
-      {
-        title: 'Питание для жима: просто и по делу',
-        content: 'Силовая работа требует топлива. Белок — 2 г на кг веса тела: куриная грудка, творог, яйца, рыба. Углеводы перед тренировкой — гречка, рис, овсянка. После тренировки — быстрые углеводы + белок (например, банан и творог). Главное правило: не дефицит калорий, если цель — силовой прогресс. Дефицит убивает рост результатов.',
-        image_url: null
-      }
+      { title: 'Добро пожаловать! Я — Алексей Голубев, МС по русскому жиму', content: 'Привет! Я Алексей Голубев — Мастер спорта по русскому жиму. Тренирую спортсменов от новичков до соревновательного уровня. На этом сайте вы найдёте тренировочные программы по жиму лёжа, полезные материалы по технике и силовой подготовке. Поехали!', image_url: null },
+      { title: 'Что такое русский жим и почему это круто', content: 'Русский жим — это жим штанги лёжа на максимальное количество повторений с фиксированным весом (как правило, 80% от веса спортсмена). Дисциплина требует сочетания взрывной силы и выносливости. Именно это делает её такой зрелищной и сложной. Спортсмен должен не просто поднять вес — он должен делать это снова и снова, сохраняя технику. Я сам прошёл путь от первого робкого жима до звания Мастера спорта и знаю, что реально работает.', image_url: null },
+      { title: 'Постановка техники жима лёжа: 5 ключевых точек', content: '1. Хват — чуть шире плеч, большой палец обхватывает гриф. 2. Сведение лопаток — грудь вперёд, плечи назад и вниз. 3. Прогиб в пояснице — естественный, не экстремальный. 4. Ноги на полу — создают жёсткую платформу, помогают стабилизировать тело. 5. Траектория грифа — лёгкая дуга от нижней части груди к точке над плечами. Первые три месяца работаем только над техникой — это фундамент всего дальнейшего прогресса.', image_url: null },
+      { title: 'Питание для жима: просто и по делу', content: 'Силовая работа требует топлива. Белок — 2 г на кг веса тела: куриная грудка, творог, яйца, рыба. Углеводы перед тренировкой — гречка, рис, овсянка. После тренировки — быстрые углеводы + белок (например, банан и творог). Главное правило: не дефицит калорий, если цель — силовой прогресс. Дефицит убивает рост результатов.', image_url: null },
     ];
-    const insert = database.prepare('INSERT INTO news (title, content, image_url) VALUES (?, ?, ?)');
-    newsItems.forEach(n => insert.run(n.title, n.content, n.image_url));
+    for (const n of newsItems) {
+      await query('INSERT INTO news (title, content, image_url) VALUES ($1, $2, $3)', [n.title, n.content, n.image_url]);
+    }
   }
 
-  const productsCount = database.prepare('SELECT COUNT(*) as cnt FROM products').get().cnt;
-  if (productsCount === 0) {
+  const { rows: prodRows } = await query('SELECT COUNT(*) as cnt FROM products');
+  if (parseInt(prodRows[0].cnt) === 0) {
     const products = [
       { name: 'Персональная консультация (1 час)', description: 'Разбор техники жима, анализ слабых мест, составление индивидуального плана. Онлайн или в зале.', price: 2500, category: 'services', stock: 999 },
       { name: 'Подготовка к соревнованиям по русскому жиму', description: 'Полный цикл подготовки к старту: пиковая программа, выход на пик формы, подбор весовой категории. 8 недель.', price: 12000, category: 'services', stock: 999 },
@@ -152,23 +142,25 @@ function seedDemoData(database) {
       { name: 'Кистевые бинты (пара)', description: 'Жёсткие бинты для поддержки запястий при максимальных весах. Длина 50 см.', price: 690, category: 'equipment', stock: 40 },
       { name: 'Дневник силовых тренировок', description: 'Специализированный дневник для записи жима: веса, повторения, самочувствие. Формат A5, 100 страниц.', price: 790, category: 'accessories', stock: 60 },
     ];
-    const insert = database.prepare('INSERT INTO products (name, description, price, category, stock) VALUES (?, ?, ?, ?, ?)');
-    products.forEach(p => insert.run(p.name, p.description, p.price, p.category, p.stock));
+    for (const p of products) {
+      await query('INSERT INTO products (name, description, price, category, stock) VALUES ($1, $2, $3, $4, $5)', [p.name, p.description, p.price, p.category, p.stock]);
+    }
   }
 
-  const trainingsCount = database.prepare('SELECT COUNT(*) as cnt FROM trainings').get().cnt;
-  if (trainingsCount === 0) {
-    const training1 = database.prepare(
-      'INSERT INTO trainings (title, description, difficulty, duration_weeks) VALUES (?, ?, ?, ?)'
-    ).run('Жим лёжа для начинающих', 'Базовый курс для тех, кто только начинает жать. Первые 4 недели — исключительно постановка техники с лёгким весом. Безопасно, системно, эффективно.', 'beginner', 4);
-
-    const training2 = database.prepare(
-      'INSERT INTO trainings (title, description, difficulty, duration_weeks) VALUES (?, ?, ?, ?)'
-    ).run('Рост силового максимума', 'Программа для увеличения одноповторного максимума (1RM) в жиме лёжа. Волнообразная периодизация, тяжёлые синглы и трипли, вспомогательные движения. Для атлетов со стажем от 1 года.', 'intermediate', 8);
-
-    const training3 = database.prepare(
-      'INSERT INTO trainings (title, description, difficulty, duration_weeks) VALUES (?, ?, ?, ?)'
-    ).run('Подготовка к русскому жиму', 'Специализированная программа для соревновательного русского жима. Работа на многоповторный жим с соревновательным весом, развитие силовой выносливости, предстартовая подводка.', 'advanced', 10);
+  const { rows: trainRows } = await query('SELECT COUNT(*) as cnt FROM trainings');
+  if (parseInt(trainRows[0].cnt) === 0) {
+    const { rows: t1 } = await query(
+      'INSERT INTO trainings (title, description, difficulty, duration_weeks) VALUES ($1, $2, $3, $4) RETURNING id',
+      ['Жим лёжа для начинающих', 'Базовый курс для тех, кто только начинает жать. Первые 4 недели — исключительно постановка техники с лёгким весом. Безопасно, системно, эффективно.', 'beginner', 4]
+    );
+    const { rows: t2 } = await query(
+      'INSERT INTO trainings (title, description, difficulty, duration_weeks) VALUES ($1, $2, $3, $4) RETURNING id',
+      ['Рост силового максимума', 'Программа для увеличения одноповторного максимума (1RM) в жиме лёжа. Волнообразная периодизация, тяжёлые синглы и трипли, вспомогательные движения. Для атлетов со стажем от 1 года.', 'intermediate', 8]
+    );
+    const { rows: t3 } = await query(
+      'INSERT INTO trainings (title, description, difficulty, duration_weeks) VALUES ($1, $2, $3, $4) RETURNING id',
+      ['Подготовка к русскому жиму', 'Специализированная программа для соревновательного русского жима. Работа на многоповторный жим с соревновательным весом, развитие силовой выносливости, предстартовая подводка.', 'advanced', 10]
+    );
 
     const exercises1 = [
       { name: 'Жим пустого грифа', sets: 4, reps: '15', rest_seconds: 60, description: 'Изучаем траекторию: опускаем на нижнюю часть груди, локти 45° к телу, лопатки сведены' },
@@ -177,7 +169,6 @@ function seedDemoData(database) {
       { name: 'Тяга гантелей лёжа (пуловер)', sets: 3, reps: '12', rest_seconds: 60, description: 'Раскрываем грудную клетку, укрепляем мышцы-антагонисты' },
       { name: 'Планка', sets: 3, reps: '40 сек', rest_seconds: 45, description: 'Базовая стабилизация кора — напрямую влияет на жёсткость в жиме' },
     ];
-
     const exercises2 = [
       { name: 'Жим лёжа (тяжёлый)', sets: 5, reps: '3', rest_seconds: 180, description: 'Рабочий вес 85–90% от ПМ. Полная амплитуда, максимальная скорость подъёма' },
       { name: 'Жим лёжа (объём)', sets: 4, reps: '6', rest_seconds: 120, description: 'Рабочий вес 75–80%. Строгая техника, контроль на негативе' },
@@ -186,11 +177,6 @@ function seedDemoData(database) {
       { name: 'Разводка гантелей лёжа', sets: 3, reps: '12', rest_seconds: 75, description: 'Изолируем грудные, восстанавливаем кровоток после тяжёлой работы' },
       { name: 'Трицепс на блоке', sets: 3, reps: '15', rest_seconds: 60, description: 'Трицепс — главный «дожиматель». Работаем в пампинг-режиме' },
     ];
-
-    const insertExercise = database.prepare(
-      'INSERT INTO exercises (training_id, name, sets, reps, rest_seconds, description, order_index) VALUES (?, ?, ?, ?, ?, ?, ?)'
-    );
-
     const exercises3 = [
       { name: 'Жим с соревновательным весом (объём)', sets: 6, reps: '5', rest_seconds: 120, description: 'Соревновательный вес (80% от веса тела). Нарабатываем уверенность с рабочим весом' },
       { name: 'Жим 70% — многоповторка', sets: 3, reps: '20', rest_seconds: 180, description: 'Развиваем силовую выносливость. Темп равномерный, без читинга' },
@@ -200,17 +186,27 @@ function seedDemoData(database) {
       { name: 'Отжимания в упоре сзади', sets: 3, reps: '15', rest_seconds: 60, description: 'Закачиваем трицепс в многоповторном режиме, имитируем усталость соревновательного подхода' },
     ];
 
-    exercises1.forEach((e, i) => insertExercise.run(training1.lastInsertRowid, e.name, e.sets, e.reps, e.rest_seconds, e.description, i));
-    exercises2.forEach((e, i) => insertExercise.run(training2.lastInsertRowid, e.name, e.sets, e.reps, e.rest_seconds, e.description, i));
-    exercises3.forEach((e, i) => insertExercise.run(training3.lastInsertRowid, e.name, e.sets, e.reps, e.rest_seconds, e.description, i));
+    const insertExercises = async (trainingId, exercises) => {
+      for (let i = 0; i < exercises.length; i++) {
+        const e = exercises[i];
+        await query(
+          'INSERT INTO exercises (training_id, name, sets, reps, rest_seconds, description, order_index) VALUES ($1, $2, $3, $4, $5, $6, $7)',
+          [trainingId, e.name, e.sets, e.reps, e.rest_seconds, e.description, i]
+        );
+      }
+    };
+
+    await insertExercises(t1[0].id, exercises1);
+    await insertExercises(t2[0].id, exercises2);
+    await insertExercises(t3[0].id, exercises3);
   }
 }
 
-function closeDb() {
-  if (db) {
-    db.close();
-    db = null;
+async function closeDb() {
+  if (pool) {
+    await pool.end();
+    pool = null;
   }
 }
 
-module.exports = { setupDatabase, getDb, closeDb };
+module.exports = { setupDatabase, getPool, query, closeDb };
